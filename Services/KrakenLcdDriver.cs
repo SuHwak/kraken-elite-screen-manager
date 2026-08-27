@@ -53,6 +53,13 @@ public sealed class KrakenLcdDriver : IDisposable
     // Index of the bucket currently on screen; never overwritten while live.
     private int _activeBucket = -1;
 
+    // Experimental stream tuning (opt-in). Defaults preserve stable behavior.
+    private readonly bool _experimentalStream = Environment.GetEnvironmentVariable("KRAKEN_EXPERIMENTAL_STREAM") == "1";
+    private readonly int _streamDrainEvery = ReadEnvInt("KRAKEN_STREAM_DRAIN_EVERY", 1, 1, 120);
+    private readonly int _streamLutEvery = ReadEnvInt("KRAKEN_STREAM_LUT_EVERY", 1, 1, 120);
+    private readonly int _streamUrb = ReadEnvInt("KRAKEN_STREAM_URB", StreamUrb, 16 * 1024, Width * Height * 3);
+    private long _streamFrameCounter;
+
     // Optional perf diagnostics for stable stream path (no protocol changes).
     private readonly bool _profileStream = Environment.GetEnvironmentVariable("KRAKEN_PROFILE_STREAM") == "1";
     private long _profileFrames;
@@ -68,7 +75,16 @@ public sealed class KrakenLcdDriver : IDisposable
     {
         OpenHid();
         OpenBulk();
+        if (_experimentalStream)
+            _log($"Experimental stream tuning enabled: drainEvery={_streamDrainEvery}, lutEvery={_streamLutEvery}, urb={_streamUrb}");
         _log("Kraken LCD driver opened.");
+    }
+
+    private static int ReadEnvInt(string name, int fallback, int min, int max)
+    {
+        var raw = Environment.GetEnvironmentVariable(name);
+        if (string.IsNullOrWhiteSpace(raw)) return fallback;
+        return int.TryParse(raw, out var value) ? Math.Clamp(value, min, max) : fallback;
     }
 
     private void OpenHid()
@@ -539,14 +555,21 @@ public sealed class KrakenLcdDriver : IDisposable
 
         lock (_hidSync)
         {
+            _streamFrameCounter++;
+            bool doDrain = !_experimentalStream || (_streamFrameCounter % _streamDrainEvery == 1);
+            bool doLut = !_experimentalStream || (_streamFrameCounter % _streamLutEvery == 1);
+
             var tDrain = System.Diagnostics.Stopwatch.StartNew();
             // ACK each HID command (flow control) so the bulk data never races ahead of "start".
-            Drain();
+            if (doDrain) Drain();
             tDrain.Stop();
 
             var tLut = System.Diagnostics.Stopwatch.StartNew();
-            WriteThenRead(StreamLut1);
-            WriteThenRead(StreamLut2);
+            if (doLut)
+            {
+                WriteThenRead(StreamLut1);
+                WriteThenRead(StreamLut2);
+            }
             tLut.Stop();
 
             var tStart = System.Diagnostics.Stopwatch.StartNew();
@@ -557,7 +580,7 @@ public sealed class KrakenLcdDriver : IDisposable
             var header = BulkMagic.Concat(new byte[] { 0x09, 0x00, 0x00, 0x00 }).Concat(lenLe).ToArray();
             var tBulk = System.Diagnostics.Stopwatch.StartNew();
             BulkWrite(header);
-            BulkWrite(rgb888, StreamUrb);                                       // match CAM's 245,760-byte transfers
+            BulkWrite(rgb888, _streamUrb);                                      // default CAM-like; tunable in experimental mode
             tBulk.Stop();
 
             var tEnd = System.Diagnostics.Stopwatch.StartNew();

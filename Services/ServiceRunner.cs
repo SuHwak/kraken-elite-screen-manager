@@ -329,7 +329,7 @@ public static class ServiceRunner
                     readMs += tRead.Elapsed.TotalMilliseconds;
                     pushMs += tPush.Elapsed.TotalMilliseconds;
 
-                    if (frames % 120 == 0)
+                    if (frames % 30 == 0)
                     {
                         var elapsed = Math.Max(0.001, rate.Elapsed.TotalSeconds);
                         var fps = frames / elapsed;

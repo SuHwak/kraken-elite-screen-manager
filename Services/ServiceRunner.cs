@@ -358,11 +358,11 @@ public static class ServiceRunner
 
     private static async Task<string?> ResolveYouTubeMediaUrlAsync(string url, CancellationToken ct)
     {
-        // First force <=720p to reduce bandwidth/decode cost and improve smoothness.
+        // First force <=420p to reduce bandwidth/decode cost and improve smoothness.
         // If unavailable on a specific video, fall back to best available stream.
         var formats = new[]
         {
-            "bv*[vcodec~='^avc1'][height<=720][fps<=30]/bv*[height<=720][fps<=30]/bv*[height<=720]/b[height<=720][fps<=30]/b[height<=720]",
+            "bv*[vcodec~='^avc1'][height<=420][fps<=30]/bv*[height<=420][fps<=30]/bv*[height<=420]/b[height<=420][fps<=30]/b[height<=420]",
             "b/bv*/best",
         };
 

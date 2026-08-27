@@ -227,7 +227,7 @@ public sealed class PreviewRenderer : IAsyncDisposable
     {
         var formats = new[]
         {
-            "bv*[vcodec~='^avc1'][height<=720][fps<=30]/bv*[height<=720][fps<=30]/bv*[height<=720]/b[height<=720][fps<=30]/b[height<=720]",
+            "bv*[vcodec~='^avc1'][height<=420][fps<=30]/bv*[height<=420][fps<=30]/bv*[height<=420]/b[height<=420][fps<=30]/b[height<=420]",
             "b/bv*/best",
         };
 

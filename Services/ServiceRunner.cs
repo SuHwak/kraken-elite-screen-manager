@@ -35,6 +35,7 @@ public static class ServiceRunner
             try
             {
                 var cfg = DashboardConfig.Load();
+                Log($"config loaded: mode={cfg.Mode}, webUrl={cfg.WebUrl}, videoFile={cfg.VideoFile}, maxFps={cfg.MaxFps}");
                 driver?.Dispose();
                 driver = new KrakenLcdDriver(Log);
                 driver.Open();
@@ -44,6 +45,7 @@ public static class ServiceRunner
 
                 if (cfg.Mode == DashboardMode.GifLoop && hasGif)
                 {
+                    Log("branch: GifLoop");
                     driver.SetBrightness(cfg.Brightness, orientation: 0);
                     var gif = GifPreparer.MakeLoop(await File.ReadAllBytesAsync(DashboardConfig.GifFile, cts.Token), cfg.Rotation);
                     driver.PushImage(gif);
@@ -52,22 +54,27 @@ public static class ServiceRunner
                 }
                 else if (cfg.Mode == DashboardMode.Dashboard)
                 {
+                    Log("branch: Dashboard");
                     await RunDashboardAsync(driver, temps, cfg, cts.Token); // enters streaming mode itself
                 }
                 else if (cfg.Mode == DashboardMode.GifDashboard && hasGif)
                 {
+                    Log("branch: GifDashboard");
                     await RunGifDashboardAsync(driver, temps, cfg, cts.Token); // gif + live dashboard overlay
                 }
                 else if (cfg.Mode == DashboardMode.WebPage && !string.IsNullOrWhiteSpace(cfg.WebUrl))
                 {
+                    Log("branch: WebPage");
                     await RunWebPageAsync(driver, temps, cfg, cts.Token); // stream any web page / YouTube loop
                 }
                 else if (cfg.Mode == DashboardMode.Video && File.Exists(cfg.VideoFile))
                 {
+                    Log($"branch: Video (exists={File.Exists(cfg.VideoFile)})");
                     await RunVideoAsync(driver, cfg, cts.Token); // local video file via ffmpeg
                 }
                 else
                 {
+                    Log("branch: Coolant/default");
                     if (cfg.Mode is DashboardMode.GifLoop or DashboardMode.GifDashboard)
                         Log("no bg.gif found — showing coolant");
                     driver.SetBrightness(cfg.Brightness, orientation: cfg.Rotation / 90); // upright stock screen
@@ -221,10 +228,15 @@ public static class ServiceRunner
 
         var stream = proc.StandardOutput.BaseStream;
         var buf = new byte[frameBytes];
+        long frames = 0;
+        double readMs = 0;
+        double pushMs = 0;
+        var rate = Stopwatch.StartNew();
         try
         {
             while (!ct.IsCancellationRequested)
             {
+                var tRead = Stopwatch.StartNew();
                 int off = 0;
                 while (off < frameBytes)
                 {
@@ -232,8 +244,23 @@ public static class ServiceRunner
                     if (n <= 0) { off = -1; break; }
                     off += n;
                 }
+                tRead.Stop();
                 if (off < 0) throw new InvalidOperationException("ffmpeg stream ended (bad file or decode error).");
+
+                var tPush = Stopwatch.StartNew();
                 driver.PushFrameRaw(buf);
+                tPush.Stop();
+
+                frames++;
+                readMs += tRead.Elapsed.TotalMilliseconds;
+                pushMs += tPush.Elapsed.TotalMilliseconds;
+                if (frames % 60 == 0)
+                {
+                    var elapsed = Math.Max(0.001, rate.Elapsed.TotalSeconds);
+                    var fps = frames / elapsed;
+                    Log($"video perf: fps={fps:F1}, read={readMs / frames:F1}ms, push={pushMs / frames:F1}ms");
+                }
+
                 if (PreviewDue())
                 {
                     using var raw = Image.LoadPixelData<Bgr24>(buf, size, size);

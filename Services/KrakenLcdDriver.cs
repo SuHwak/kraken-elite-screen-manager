@@ -53,11 +53,14 @@ public sealed class KrakenLcdDriver : IDisposable
     // Index of the bucket currently on screen; never overwritten while live.
     private int _activeBucket = -1;
 
-    // Experimental stream tuning (opt-in). Defaults preserve stable behavior.
+    // Experimental stream tuning (opt-in). Keep protocol strict by default; only
+    // transport-level knobs are enabled for conservative FPS experiments.
     private readonly bool _experimentalStream = Environment.GetEnvironmentVariable("KRAKEN_EXPERIMENTAL_STREAM") == "1";
     private readonly int _streamDrainEvery = ReadEnvInt("KRAKEN_STREAM_DRAIN_EVERY", 1, 1, 120);
     private readonly int _streamLutEvery = ReadEnvInt("KRAKEN_STREAM_LUT_EVERY", 1, 1, 120);
     private readonly int _streamUrb = ReadEnvInt("KRAKEN_STREAM_URB", StreamUrb, 16 * 1024, Width * Height * 3);
+    private readonly int _streamBulkTimeoutMs = ReadEnvInt("KRAKEN_STREAM_BULK_TIMEOUT_MS", BulkTimeoutMs, 500, 15000);
+    private readonly int _streamBulkRetries = ReadEnvInt("KRAKEN_STREAM_BULK_RETRIES", 1, 0, 3);
     private long _streamFrameCounter;
 
     // Optional perf diagnostics for stable stream path (no protocol changes).
@@ -76,7 +79,7 @@ public sealed class KrakenLcdDriver : IDisposable
         OpenHid();
         OpenBulk();
         if (_experimentalStream)
-            _log($"Experimental stream tuning enabled: drainEvery={_streamDrainEvery}, lutEvery={_streamLutEvery}, urb={_streamUrb}");
+            _log($"Experimental stream tuning enabled: drainEvery={_streamDrainEvery}, lutEvery={_streamLutEvery}, urb={_streamUrb}, bulkTimeoutMs={_streamBulkTimeoutMs}, bulkRetries={_streamBulkRetries}");
         _log("Kraken LCD driver opened.");
     }
 
@@ -295,17 +298,31 @@ public sealed class KrakenLcdDriver : IDisposable
         }
     }
 
-    private void BulkWrite(byte[] data) => BulkWrite(data, BulkChunk);
+    private void BulkWrite(byte[] data) => BulkWrite(data, BulkChunk, BulkTimeoutMs, retries: 0);
 
     private void BulkWrite(byte[] data, int chunk)
+        => BulkWrite(data, chunk, BulkTimeoutMs, retries: 0);
+
+    private void BulkWrite(byte[] data, int chunk, int timeoutMs, int retries)
     {
         if (_bulkOut is null) throw new InvalidOperationException("Bulk endpoint not open.");
         for (int i = 0; i < data.Length; i += chunk)
         {
             int len = Math.Min(chunk, data.Length - i);
-            var err = _bulkOut.Write(data, i, len, BulkTimeoutMs, out int sent);
+            Error err = Error.Success;
+            int sent = 0;
+            int attempts = 0;
+            int maxAttempts = Math.Max(1, retries + 1);
+
+            while (attempts < maxAttempts)
+            {
+                attempts++;
+                err = _bulkOut.Write(data, i, len, timeoutMs, out sent);
+                if (err == Error.Success && sent == len) break;
+            }
+
             if (err != Error.Success || sent != len)
-                throw new InvalidOperationException($"Bulk write failed: {err} ({sent}/{len} bytes).");
+                throw new InvalidOperationException($"Bulk write failed: {err} ({sent}/{len} bytes), attempts={attempts}.");
         }
     }
 
@@ -556,8 +573,9 @@ public sealed class KrakenLcdDriver : IDisposable
         lock (_hidSync)
         {
             _streamFrameCounter++;
-            bool doDrain = !_experimentalStream || (_streamFrameCounter % _streamDrainEvery == 1);
-            bool doLut = !_experimentalStream || (_streamFrameCounter % _streamLutEvery == 1);
+            // Conservative mode: keep strict protocol cadence to avoid visual corruption.
+            bool doDrain = true;
+            bool doLut = true;
 
             var tDrain = System.Diagnostics.Stopwatch.StartNew();
             // ACK each HID command (flow control) so the bulk data never races ahead of "start".
@@ -579,8 +597,16 @@ public sealed class KrakenLcdDriver : IDisposable
             var lenLe = BitConverter.GetBytes((uint)rgb888.Length);
             var header = BulkMagic.Concat(new byte[] { 0x09, 0x00, 0x00, 0x00 }).Concat(lenLe).ToArray();
             var tBulk = System.Diagnostics.Stopwatch.StartNew();
-            BulkWrite(header);
-            BulkWrite(rgb888, _streamUrb);                                      // default CAM-like; tunable in experimental mode
+            if (_experimentalStream)
+            {
+                BulkWrite(header, chunk: header.Length, timeoutMs: _streamBulkTimeoutMs, retries: _streamBulkRetries);
+                BulkWrite(rgb888, chunk: _streamUrb, timeoutMs: _streamBulkTimeoutMs, retries: _streamBulkRetries);
+            }
+            else
+            {
+                BulkWrite(header);
+                BulkWrite(rgb888, StreamUrb);                                   // match CAM's 245,760-byte transfers
+            }
             tBulk.Stop();
 
             var tEnd = System.Diagnostics.Stopwatch.StartNew();

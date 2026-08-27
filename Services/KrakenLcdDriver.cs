@@ -10,8 +10,10 @@ using LibUsbDotNet.Main;
 namespace KrakenEliteScreenManager.Services;
 
 /// <summary>
-/// Native USB driver for the NZXT Kraken 2023 Elite LCD (1e71:300c), ported
-/// from liquidctl's KrakenZ3 driver. Two channels (hidapi + pyusb split):
+/// Native USB driver for NZXT Kraken Elite LCD devices (vendor 1e71), ported
+/// from liquidctl's KrakenZ3 driver. Supports known compatible product IDs
+/// including 300c (Kraken 2023 Elite) and 3012 (Kraken Elite RGB 2024).
+/// Two channels (hidapi + pyusb split):
 ///   - HID control (HidSharp): 64-byte reports for brightness/orientation/buckets.
 ///   - bulk image (LibUsbDotNet): endpoint 0x02 for the GIF payload.
 ///
@@ -22,6 +24,7 @@ public sealed class KrakenLcdDriver : IDisposable
 {
     public const int VendorId = 0x1E71;
     public const int ProductId = 0x300C;
+    public static readonly int[] SupportedProductIds = { 0x3012, 0x300C };
     public const int Width = 640;
     public const int Height = 640;
 
@@ -35,6 +38,7 @@ public sealed class KrakenLcdDriver : IDisposable
         { 0x12, 0xFA, 0x01, 0xE8, 0xAB, 0xCD, 0xEF, 0x98, 0x76, 0x54, 0x32, 0x10 };
 
     private readonly Action<string> _log;
+    private readonly object _hidSync = new();
 
     private HidStream? _hid;
     private int _hidOutOffset; // 1 if the HID report carries a leading report-id byte
@@ -44,6 +48,7 @@ public sealed class KrakenLcdDriver : IDisposable
     private IUsbDevice? _bulkDevice;
     private UsbEndpointWriter? _bulkOut;
     private int _claimedInterface = -1;
+    private int _selectedProductId = ProductId;
 
     // Index of the bucket currently on screen; never overwritten while live.
     private int _activeBucket = -1;
@@ -59,10 +64,12 @@ public sealed class KrakenLcdDriver : IDisposable
 
     private void OpenHid()
     {
-        var dev = DeviceList.Local.GetHidDevices(VendorId, ProductId).FirstOrDefault()
+        var dev = FindHidDevice(out var productId)
             ?? throw new InvalidOperationException(
-                $"Kraken HID interface {VendorId:x4}:{ProductId:x4} not found. " +
+                $"Kraken HID interface {VendorId:x4}:[{FormatSupportedProducts()}] not found. " +
                 "Is the device connected and the udev rule installed?");
+
+        _selectedProductId = productId;
 
         if (!dev.TryOpen(out _hid))
             throw new InvalidOperationException(
@@ -74,16 +81,19 @@ public sealed class KrakenLcdDriver : IDisposable
         _hidInOffset = dev.GetMaxInputReportLength() > ReportLength ? 1 : 0;
         _hid!.ReadTimeout = 150;   // device replies in a few ms; keeps Command() snappy
         _hid!.WriteTimeout = 2000; // never hang forever on a stuck device — fail and let us recover
-        _log($"HID open (out+{_hidOutOffset}, in+{_hidInOffset}).");
+        _log($"HID open for {VendorId:x4}:{_selectedProductId:x4} (out+{_hidOutOffset}, in+{_hidInOffset}).");
     }
 
     private void OpenBulk()
     {
         _usb = new UsbContext();
-        var finder = new UsbDeviceFinder { Vid = VendorId, Pid = ProductId };
-        _bulkDevice = _usb.Find(finder)
+
+        // Prefer matching the same product ID detected on HID, then fall back.
+        _bulkDevice = FindBulkDevice(_usb, _selectedProductId, out var bulkProductId)
             ?? throw new InvalidOperationException(
-                $"Kraken USB device {VendorId:x4}:{ProductId:x4} not found for bulk transfer.");
+                $"Kraken USB device {VendorId:x4}:[{FormatSupportedProducts()}] not found for bulk transfer.");
+
+        _selectedProductId = bulkProductId;
 
         _bulkDevice.Open();
         // The HID interface is owned by the kernel/hidraw; only detach for the
@@ -97,8 +107,47 @@ public sealed class KrakenLcdDriver : IDisposable
         _bulkDevice.ClaimInterface(iface.Number);
         _claimedInterface = iface.Number;
         _bulkOut = _bulkDevice.OpenEndpointWriter((WriteEndpointID)epAddr);
-        _log($"Bulk open (interface {iface.Number}, EP 0x{epAddr:x2}).");
+        _log($"Bulk open for {VendorId:x4}:{_selectedProductId:x4} (interface {iface.Number}, EP 0x{epAddr:x2}).");
     }
+
+    private static HidDevice? FindHidDevice(out int productId)
+    {
+        foreach (var pid in SupportedProductIds)
+        {
+            var dev = DeviceList.Local.GetHidDevices(VendorId, pid).FirstOrDefault();
+            if (dev is not null)
+            {
+                productId = pid;
+                return dev;
+            }
+        }
+
+        productId = ProductId;
+        return null;
+    }
+
+    private static IUsbDevice? FindBulkDevice(UsbContext usb, int preferredProductId, out int productId)
+    {
+        IEnumerable<int> probeOrder = new[] { preferredProductId }
+            .Concat(SupportedProductIds)
+            .Distinct();
+
+        foreach (var pid in probeOrder)
+        {
+            var dev = usb.Find(new UsbDeviceFinder { Vid = VendorId, Pid = pid });
+            if (dev is not null)
+            {
+                productId = pid;
+                return dev;
+            }
+        }
+
+        productId = preferredProductId;
+        return null;
+    }
+
+    private static string FormatSupportedProducts() =>
+        string.Join(",", SupportedProductIds.Select(pid => pid.ToString("x4")));
 
     private static UsbInterfaceInfo? FindBulkInterface(IUsbDevice device, out byte epAddr)
     {
@@ -121,25 +170,31 @@ public sealed class KrakenLcdDriver : IDisposable
 
     private void Write(params byte[] data)
     {
-        if (_hid is null) throw new InvalidOperationException("HID not open.");
-        var buf = new byte[ReportLength + _hidOutOffset];
-        Array.Copy(data, 0, buf, _hidOutOffset, Math.Min(data.Length, ReportLength));
-        _hid.Write(buf);
+        lock (_hidSync)
+        {
+            if (_hid is null) throw new InvalidOperationException("HID not open.");
+            var buf = new byte[ReportLength + _hidOutOffset];
+            Array.Copy(data, 0, buf, _hidOutOffset, Math.Min(data.Length, ReportLength));
+            _hid.Write(buf);
+        }
     }
 
     /// <summary>Read one report (aligned so index 0 is the first real byte), or null on timeout.</summary>
     private byte[]? ReadReport()
     {
-        try
+        lock (_hidSync)
         {
-            var raw = new byte[ReportLength + _hidInOffset];
-            int read = _hid!.Read(raw);
-            if (read <= 0) return null;
-            var msg = new byte[ReportLength];
-            Array.Copy(raw, _hidInOffset, msg, 0, Math.Min(ReportLength, Math.Max(0, read - _hidInOffset)));
-            return msg;
+            try
+            {
+                var raw = new byte[ReportLength + _hidInOffset];
+                int read = _hid!.Read(raw);
+                if (read <= 0) return null;
+                var msg = new byte[ReportLength];
+                Array.Copy(raw, _hidInOffset, msg, 0, Math.Min(ReportLength, Math.Max(0, read - _hidInOffset)));
+                return msg;
+            }
+            catch (TimeoutException) { return null; }
         }
-        catch (TimeoutException) { return null; }
     }
 
     /// <summary>
@@ -150,27 +205,69 @@ public sealed class KrakenLcdDriver : IDisposable
     /// </summary>
     private byte[]? Command(byte b0, byte b1, params byte[] rest)
     {
-        var data = new byte[2 + rest.Length];
-        data[0] = b0; data[1] = b1;
-        Array.Copy(rest, 0, data, 2, rest.Length);
-        Write(data);
-
-        for (int i = 0; i < 24; i++)
+        lock (_hidSync)
         {
-            var msg = ReadReport();
-            if (msg is null) return null;
-            if (msg[0] == (byte)(b0 + 1) && msg[1] == b1) return msg;
+            var data = new byte[2 + rest.Length];
+            data[0] = b0;
+            data[1] = b1;
+            Array.Copy(rest, 0, data, 2, rest.Length);
+
+            if (_hid is null) throw new InvalidOperationException("HID not open.");
+            var outBuf = new byte[ReportLength + _hidOutOffset];
+            Array.Copy(data, 0, outBuf, _hidOutOffset, Math.Min(data.Length, ReportLength));
+            _hid.Write(outBuf);
+
+            for (int i = 0; i < 24; i++)
+            {
+                try
+                {
+                    var raw = new byte[ReportLength + _hidInOffset];
+                    int read = _hid.Read(raw);
+                    if (read <= 0) return null;
+
+                    var msg = new byte[ReportLength];
+                    Array.Copy(raw, _hidInOffset, msg, 0, Math.Min(ReportLength, Math.Max(0, read - _hidInOffset)));
+                    if (msg[0] == (byte)(b0 + 1) && msg[1] == b1) return msg;
+                }
+                catch (TimeoutException)
+                {
+                    return null;
+                }
+            }
+
+            return null;
         }
-        return null;
     }
 
     /// <summary>Discard any pending/stale reports so the next Command() starts clean.</summary>
     private void Drain()
     {
-        var saved = _hid!.ReadTimeout;
-        _hid.ReadTimeout = 4;
-        try { while (ReadReport() is not null) { } }
-        finally { _hid.ReadTimeout = saved; }
+        lock (_hidSync)
+        {
+            if (_hid is null) return;
+            var saved = _hid.ReadTimeout;
+            _hid.ReadTimeout = 4;
+            try
+            {
+                while (true)
+                {
+                    try
+                    {
+                        var raw = new byte[ReportLength + _hidInOffset];
+                        int read = _hid.Read(raw);
+                        if (read <= 0) break;
+                    }
+                    catch (TimeoutException)
+                    {
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                _hid.ReadTimeout = saved;
+            }
+        }
     }
 
     private void BulkWrite(byte[] data) => BulkWrite(data, BulkChunk);
@@ -193,8 +290,98 @@ public sealed class KrakenLcdDriver : IDisposable
     /// in-order single read, matching liquidctl.</summary>
     private byte[] WriteThenRead(params byte[] data)
     {
-        Write(data);
-        return ReadReport() ?? new byte[ReportLength];
+        lock (_hidSync)
+        {
+            if (_hid is null) throw new InvalidOperationException("HID not open.");
+
+            var outBuf = new byte[ReportLength + _hidOutOffset];
+            Array.Copy(data, 0, outBuf, _hidOutOffset, Math.Min(data.Length, ReportLength));
+            _hid.Write(outBuf);
+
+            try
+            {
+                var raw = new byte[ReportLength + _hidInOffset];
+                int read = _hid.Read(raw);
+                if (read <= 0) return new byte[ReportLength];
+
+                var msg = new byte[ReportLength];
+                Array.Copy(raw, _hidInOffset, msg, 0, Math.Min(ReportLength, Math.Max(0, read - _hidInOffset)));
+                return msg;
+            }
+            catch (TimeoutException)
+            {
+                return new byte[ReportLength];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Read coolant temperature directly from the Kraken status report.
+    /// Returns null if unavailable or if the firmware reports an invalid value.
+    /// </summary>
+    public double? ReadCoolantTemperature()
+    {
+        lock (_hidSync)
+        {
+            if (_hid is null) return null;
+
+            // Match liquidctl's Z3 direct status sequence: write 0x74/0x01 then read.
+            Drain();
+
+            var outBuf = new byte[ReportLength + _hidOutOffset];
+            outBuf[_hidOutOffset] = 0x74;
+            outBuf[_hidOutOffset + 1] = 0x01;
+            _hid.Write(outBuf);
+
+            try
+            {
+                var raw = new byte[ReportLength + 1];
+                int read = _hid.Read(raw);
+                if (read > 0)
+                {
+                    var temp = ParseCoolantTempFromRaw(raw, read);
+                    if (temp is not null) return temp;
+                }
+            }
+            catch (TimeoutException)
+            {
+                return null;
+            }
+
+            // Fallback: try prefix-matched command/read path.
+            var msg = Command(0x74, 0x01);
+            return msg is null ? null : ParseCoolantTemp(msg);
+        }
+    }
+
+    private static double? ParseCoolantTemp(byte[] msg)
+    {
+        if (msg.Length <= 16) return null;
+        // Only parse the direct status reply for command 0x74/0x01.
+        if (msg[0] != 0x75 || msg[1] != 0x01) return null;
+        if (msg[15] == 0xFF && msg[16] == 0xFF) return null;
+
+        var value = msg[15] + (msg[16] / 10.0);
+        return value is >= 15 and <= 100 ? value : null;
+    }
+
+    private double? ParseCoolantTempFromRaw(byte[] raw, int read)
+    {
+        // Some platforms expose report-id in reads, others don't. Probe both.
+        foreach (var offset in new[] { _hidInOffset, 0, 1 }.Distinct())
+        {
+            if (offset < 0 || offset + 16 >= read) continue;
+            if (raw[offset] != 0x75 || raw[offset + 1] != 0x01) continue;
+
+            int whole = raw[offset + 15];
+            int frac = raw[offset + 16];
+            if (whole == 0xFF && frac == 0xFF) return null;
+
+            var value = whole + (frac / 10.0);
+            if (value is >= 15 and <= 100) return value;
+        }
+
+        return null;
     }
 
     public (int brightness, int orientation) ReadLcdInfo()
@@ -231,12 +418,23 @@ public sealed class KrakenLcdDriver : IDisposable
         try
         {
             using var ctx = new UsbContext();
-            var dev = ctx.Find(new UsbDeviceFinder { Vid = VendorId, Pid = ProductId });
+            IUsbDevice? dev = null;
+            int foundPid = ProductId;
+            foreach (var pid in SupportedProductIds)
+            {
+                dev = ctx.Find(new UsbDeviceFinder { Vid = VendorId, Pid = pid });
+                if (dev is not null)
+                {
+                    foundPid = pid;
+                    break;
+                }
+            }
+
             if (dev is null) { log?.Invoke("Reset: device not found (off the bus — power-cycle needed)."); return false; }
             dev.Open();
             dev.ResetDevice();
             dev.Dispose();
-            log?.Invoke("USB reset issued.");
+            log?.Invoke($"USB reset issued for {VendorId:x4}:{foundPid:x4}.");
             return true;
         }
         catch (Exception ex)
@@ -301,18 +499,21 @@ public sealed class KrakenLcdDriver : IDisposable
     /// </summary>
     public void EnterStreamingMode(int percent = 80)
     {
-        Drain();
-        WriteThenRead(0x10, 0x02);
-        WriteThenRead(0x70, 0x02, 0x01, 0xb8, 0x0b);
-        WriteThenRead(0x74, 0x01);
-        WriteThenRead(0x36, 0x04);
-        WriteThenRead(0x30, 0x01);
-        WriteThenRead(0x36, 0x03);
-        WriteThenRead(0x30, 0x02, 0x00, 0x00, 0x00, 0x00, 0x1e);
-        WriteThenRead(0x38, 0x01, 0x02);                                 // switch to liquid (clears)
-        for (byte i = 0; i < 16; i++) WriteThenRead(0x32, 0x02, i);      // delete all 16 buckets
-        WriteThenRead(0x30, 0x02, 0x01, (byte)Math.Clamp(percent, 0, 100), 0x00, 0x00, 0x00, 0x1e);
-        Drain();
+        lock (_hidSync)
+        {
+            Drain();
+            WriteThenRead(0x10, 0x02);
+            WriteThenRead(0x70, 0x02, 0x01, 0xb8, 0x0b);
+            WriteThenRead(0x74, 0x01);
+            WriteThenRead(0x36, 0x04);
+            WriteThenRead(0x30, 0x01);
+            WriteThenRead(0x36, 0x03);
+            WriteThenRead(0x30, 0x02, 0x00, 0x00, 0x00, 0x00, 0x1e);
+            WriteThenRead(0x38, 0x01, 0x02);                                 // switch to liquid (clears)
+            for (byte i = 0; i < 16; i++) WriteThenRead(0x32, 0x02, i);      // delete all 16 buckets
+            WriteThenRead(0x30, 0x02, 0x01, (byte)Math.Clamp(percent, 0, 100), 0x00, 0x00, 0x00, 0x1e);
+            Drain();
+        }
     }
 
     /// <summary>
@@ -327,18 +528,21 @@ public sealed class KrakenLcdDriver : IDisposable
         if (rgb888.Length != expected)
             throw new ArgumentException($"expected {expected} RGB888 bytes, got {rgb888.Length}");
 
-        // ACK each HID command (flow control) so the bulk data never races ahead of "start".
-        Drain();
-        WriteThenRead(StreamLut1);
-        WriteThenRead(StreamLut2);
-        WriteThenRead(0x36, 0x01, 0x00, 0x01, 0x09);                    // start, asset mode 0x09
+        lock (_hidSync)
+        {
+            // ACK each HID command (flow control) so the bulk data never races ahead of "start".
+            Drain();
+            WriteThenRead(StreamLut1);
+            WriteThenRead(StreamLut2);
+            WriteThenRead(0x36, 0x01, 0x00, 0x01, 0x09);                    // start, asset mode 0x09
 
-        var lenLe = BitConverter.GetBytes((uint)rgb888.Length);
-        var header = BulkMagic.Concat(new byte[] { 0x09, 0x00, 0x00, 0x00 }).Concat(lenLe).ToArray();
-        BulkWrite(header);
-        BulkWrite(rgb888, StreamUrb);                                   // match CAM's 245,760-byte transfers
+            var lenLe = BitConverter.GetBytes((uint)rgb888.Length);
+            var header = BulkMagic.Concat(new byte[] { 0x09, 0x00, 0x00, 0x00 }).Concat(lenLe).ToArray();
+            BulkWrite(header);
+            BulkWrite(rgb888, StreamUrb);                                   // match CAM's 245,760-byte transfers
 
-        WriteThenRead(0x36, 0x02);                                      // end
+            WriteThenRead(0x36, 0x02);                                      // end
+        }
     }
 
     // --- bucket helpers (ported from liquidctl) ------------------------------

@@ -1,11 +1,12 @@
 # KrakenEliteScreenManager
 
-A native, **sudo-free Linux** tool for the **NZXT Kraken 2023 Elite** LCD (`1e71:300c`) — a small
+A native, **sudo-free Linux** tool for the **NZXT Kraken Elite** LCDs (`1e71:300c`, `1e71:3012`) — a small
 stand-in for NZXT CAM, which doesn't run on Linux. It talks to the cooler directly over USB
 (HidSharp + LibUsbDotNet); no CAM, no liquidctl at runtime.
 
-> **Scope:** this targets the **Kraken 2023 Elite** (`300c`, firmware 2.x) specifically — its GIF/bucket
-> display protocol. Other Kraken models use different screens/protocols and are **not** supported.
+> **Scope:** this targets known compatible Kraken Elite firmware/protocol variants,
+> currently **300c** (Kraken 2023 Elite) and **3012** (Kraken Elite RGB 2024).
+> Other Kraken models use different screens/protocols and are **not** supported.
 
 It has two parts:
 - a **GUI config editor** — pick what the screen shows, and

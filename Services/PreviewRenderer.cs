@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
+using System.Text.Json;
 using System.Threading.Tasks;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
@@ -26,6 +28,9 @@ public sealed class PreviewRenderer : IAsyncDisposable
     private Image<Rgba32>? _gifFrame0;
     private string? _videoPath;
     private byte[]? _videoPng;
+    private readonly HttpClient _serviceSensors = new() { Timeout = TimeSpan.FromMilliseconds(500) };
+    private DateTime _coolantStamp;
+    private double? _coolantCached;
 
     /// <summary>Returns PNG/JPEG bytes of the preview, or null if the mode has no preview (Coolant).</summary>
     public async Task<byte[]?> RenderAsync(DashboardMode mode, OverlayStyle style, int dim,
@@ -64,7 +69,7 @@ public sealed class PreviewRenderer : IAsyncDisposable
         if (_sensor is null)
         {
             var html = Path.Combine(AppContext.BaseDirectory, "assets", "dashboard.html");
-            _sensor = new SensorServer(html, new TemperatureService(), Port);
+            _sensor = new SensorServer(html, new TemperatureService(ReadCoolantFromService), Port);
             _sensor.Start();
         }
         if (_web is null)
@@ -146,10 +151,36 @@ public sealed class PreviewRenderer : IAsyncDisposable
         return ms.ToArray();
     }
 
+    /// <summary>
+    /// Preview process fallback: re-use coolant from the running service's sensor endpoint.
+    /// Cached briefly so we do not block preview on every JSON request.
+    /// </summary>
+    private double? ReadCoolantFromService()
+    {
+        if ((DateTime.UtcNow - _coolantStamp).TotalMilliseconds < 1200)
+            return _coolantCached;
+
+        try
+        {
+            var json = _serviceSensors.GetStringAsync("http://localhost:9234/data.json").GetAwaiter().GetResult();
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("coolant", out var c) && c.ValueKind == JsonValueKind.Number)
+                _coolantCached = c.GetDouble();
+        }
+        catch
+        {
+            // Service may be stopped while editing settings; keep previous cached value.
+        }
+
+        _coolantStamp = DateTime.UtcNow;
+        return _coolantCached;
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_web is not null) await _web.DisposeAsync();
         _sensor?.Dispose();
         _gifFrame0?.Dispose();
+        _serviceSensors.Dispose();
     }
 }

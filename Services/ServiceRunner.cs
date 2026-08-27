@@ -26,7 +26,6 @@ public static class ServiceRunner
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
         using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, ctx => { ctx.Cancel = true; cts.Cancel(); });
 
-        var temps = new TemperatureService();
         Log("service starting");
 
         KrakenLcdDriver? driver = null;
@@ -38,6 +37,7 @@ public static class ServiceRunner
                 driver?.Dispose();
                 driver = new KrakenLcdDriver(Log);
                 driver.Open();
+                var temps = new TemperatureService(driver.ReadCoolantTemperature);
 
                 bool hasGif = File.Exists(DashboardConfig.GifFile);
 
@@ -59,7 +59,7 @@ public static class ServiceRunner
                 }
                 else if (cfg.Mode == DashboardMode.WebPage && !string.IsNullOrWhiteSpace(cfg.WebUrl))
                 {
-                    await RunWebPageAsync(driver, cfg, cts.Token); // stream any web page / YouTube loop
+                    await RunWebPageAsync(driver, temps, cfg, cts.Token); // stream any web page / YouTube loop
                 }
                 else if (cfg.Mode == DashboardMode.Video && File.Exists(cfg.VideoFile))
                 {
@@ -131,7 +131,7 @@ public static class ServiceRunner
     }
 
     /// <summary>Stream any web page / YouTube loop, full-frame, at the configured cap.</summary>
-    private static async Task RunWebPageAsync(KrakenLcdDriver driver, DashboardConfig cfg, CancellationToken ct)
+    private static async Task RunWebPageAsync(KrakenLcdDriver driver, TemperatureService temps, DashboardConfig cfg, CancellationToken ct)
     {
         // A local HTML file is served through our sensor server so the page can
         // fetch('/data.json') same-origin; a remote URL is loaded directly.
@@ -142,7 +142,7 @@ public static class ServiceRunner
         string target;
         if (isLocalFile)
         {
-            server = new SensorServer(input, new TemperatureService());
+            server = new SensorServer(input, temps);
             server.Start();
             target = server.Url;
         }

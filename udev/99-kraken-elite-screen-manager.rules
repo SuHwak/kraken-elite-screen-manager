@@ -1,5 +1,6 @@
-# Allow non-root access to the NZXT Kraken 2023 Elite (1e71:300c) so
-# KrakenEliteScreenManager can drive the LCD without sudo.
+# Allow non-root access to supported NZXT Kraken Elite LCD devices
+# (1e71:300c and 1e71:3012) so KrakenEliteScreenManager can drive the LCD
+# without sudo.
 #
 # Grants the active logged-in user access (uaccess, via systemd-logind) plus a
 # 0660 group fallback. Covers BOTH interfaces we use:
@@ -13,3 +14,5 @@
 # kept so it keeps working cleanly across reboots/replugs too.
 SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c", MODE="0660", GROUP="wheel", TAG+="uaccess"
 KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c", MODE="0660", GROUP="wheel", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3012", MODE="0660", GROUP="wheel", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3012", MODE="0660", GROUP="wheel", TAG+="uaccess"

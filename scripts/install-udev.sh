@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs the udev rule that lets KrakenEliteScreenManager talk to the Kraken Elite
-# (1e71:300c) without sudo. Run once: sudo ./scripts/install-udev.sh
+# (1e71:300c, 1e71:3012) without sudo. Run once: sudo ./scripts/install-udev.sh
 set -euo pipefail
 
 RULE_SRC="$(cd "$(dirname "$0")/.." && pwd)/udev/99-kraken-elite-screen-manager.rules"

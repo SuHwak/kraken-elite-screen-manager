@@ -358,39 +358,50 @@ public static class ServiceRunner
 
     private static async Task<string?> ResolveYouTubeMediaUrlAsync(string url, CancellationToken ct)
     {
-        var psi = new ProcessStartInfo("yt-dlp")
+        // First force <=720p to reduce bandwidth/decode cost and improve smoothness.
+        // If unavailable on a specific video, fall back to best available stream.
+        var formats = new[]
         {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
+            "bv*[vcodec~='^avc1'][height<=720][fps<=30]/bv*[height<=720][fps<=30]/bv*[height<=720]/b[height<=720][fps<=30]/b[height<=720]",
+            "b/bv*/best",
         };
 
-        foreach (var a in new[]
-                 {
-                     "--no-playlist",
-                     "-f", "bv*[vcodec~='^avc1'][height<=720][fps<=30]/bv*[height<=720][fps<=30]/bv*[height<=720]/b[height<=720][fps<=30]/b[height<=720]/b",
-                     "-g",
-                     url,
-                 })
-            psi.ArgumentList.Add(a);
-
-        using var proc = Process.Start(psi)
-            ?? throw new InvalidOperationException("yt-dlp not found — install yt-dlp for YouTube fallback.");
-
-        string stdout = await proc.StandardOutput.ReadToEndAsync();
-        string stderr = await proc.StandardError.ReadToEndAsync();
-        await proc.WaitForExitAsync(ct);
-
-        if (proc.ExitCode != 0)
-            throw new InvalidOperationException($"yt-dlp failed: {stderr.Trim()}");
-
-        foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        string? lastErr = null;
+        foreach (var format in formats)
         {
-            if (line.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
-                || line.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-                return line;
+            var psi = new ProcessStartInfo("yt-dlp")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+
+            foreach (var a in new[] { "--no-playlist", "-f", format, "-g", url })
+                psi.ArgumentList.Add(a);
+
+            using var proc = Process.Start(psi)
+                ?? throw new InvalidOperationException("yt-dlp not found — install yt-dlp for YouTube fallback.");
+
+            string stdout = await proc.StandardOutput.ReadToEndAsync();
+            string stderr = await proc.StandardError.ReadToEndAsync();
+            await proc.WaitForExitAsync(ct);
+
+            if (proc.ExitCode != 0)
+            {
+                lastErr = stderr.Trim();
+                continue;
+            }
+
+            foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (line.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                    return line;
+            }
         }
 
+        if (!string.IsNullOrWhiteSpace(lastErr))
+            throw new InvalidOperationException($"yt-dlp failed: {lastErr}");
         return null;
     }
 

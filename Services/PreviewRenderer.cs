@@ -225,32 +225,38 @@ public sealed class PreviewRenderer : IAsyncDisposable
 
     private static async Task<string?> ResolveYouTubeMediaUrlAsync(string url)
     {
-        var psi = new ProcessStartInfo("yt-dlp")
+        var formats = new[]
         {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
+            "bv*[vcodec~='^avc1'][height<=720][fps<=30]/bv*[height<=720][fps<=30]/bv*[height<=720]/b[height<=720][fps<=30]/b[height<=720]",
+            "b/bv*/best",
         };
 
-        foreach (var a in new[]
-                 {
-                     "--no-playlist",
-                     "-f", "bv*[vcodec~='^avc1'][height<=720][fps<=30]/bv*[height<=720][fps<=30]/bv*[height<=720]/b[height<=720][fps<=30]/b[height<=720]/b",
-                     "-g",
-                     url,
-                 })
-            psi.ArgumentList.Add(a);
+        foreach (var format in formats)
+        {
+            var psi = new ProcessStartInfo("yt-dlp")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
 
-        using var proc = Process.Start(psi);
-        if (proc is null) return null;
+            foreach (var a in new[] { "--no-playlist", "-f", format, "-g", url })
+                psi.ArgumentList.Add(a);
 
-        string stdout = await proc.StandardOutput.ReadToEndAsync();
-        await proc.WaitForExitAsync();
-        if (proc.ExitCode != 0) return null;
+            using var proc = Process.Start(psi);
+            if (proc is null) return null;
 
-        return stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .FirstOrDefault(line => line.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
-                                    || line.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
+            string stdout = await proc.StandardOutput.ReadToEndAsync();
+            await proc.WaitForExitAsync();
+            if (proc.ExitCode != 0) continue;
+
+            var hit = stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault(line => line.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                                        || line.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
+            if (hit is not null) return hit;
+        }
+
+        return null;
     }
 
     private static byte[] ToPng(Image img)

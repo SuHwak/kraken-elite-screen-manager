@@ -22,7 +22,7 @@ It has two parts:
   legibility option (frosted chips / dim / vignette + a dimming slider).
 - **Web Page** — stream **any URL or your own local HTML page** to the LCD. A local page is served
   same-origin so it can `fetch('/data.json')` for live sensors (below). YouTube links auto-embed and
-  loop, muted (note: needs a codec-capable browser; the bundled Chromium can't play YouTube).
+  loop, muted. If embed playback fails, the service auto-falls back to `yt-dlp + ffmpeg` for YouTube.
 - **Video** — loop a **local video file** (mp4/mkv/webm/…), decoded by **FFmpeg** (any codec).
 - **Stock Coolant** — the built-in NZXT liquid-temperature screen.
 
@@ -43,6 +43,7 @@ In Dashboard / GIF+Dashboard / local Web Page modes, sensors are served at
 - A **systemd**-based Linux (the service uses `systemctl --user`).
 - Optional: `nvidia-smi` for NVIDIA GPU stats; AMD GPUs are read from `/sys` automatically.
 - Optional, for **Video mode**: `ffmpeg` (e.g. `sudo dnf install ffmpeg`).
+- Optional, for **Web Page mode YouTube fallback**: `yt-dlp` (used automatically if browser embed fails).
 - Optional, for **Web Page mode with YouTube/video sites**: a system `chrome`/`chromium`
   install with media codecs. (Playwright's bundled Chromium is enough for Dashboard rendering,
   but may fail on YouTube playback.)

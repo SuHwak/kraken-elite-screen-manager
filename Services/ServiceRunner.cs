@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -136,6 +137,7 @@ public static class ServiceRunner
         // A local HTML file is served through our sensor server so the page can
         // fetch('/data.json') same-origin; a remote URL is loaded directly.
         var input = cfg.WebUrl.Trim();
+        bool isYouTube = IsYouTubeUrl(input);
         bool isLocalFile = !input.StartsWith("http", StringComparison.OrdinalIgnoreCase) && File.Exists(input);
 
         SensorServer? server = null;
@@ -153,26 +155,36 @@ public static class ServiceRunner
 
         try
         {
-            await using var renderer = new WebRenderer(KrakenLcdDriver.Width);
-            await renderer.StartAsync(target);
-
-            driver.EnterStreamingMode(cfg.Brightness);
-            Log($"web-page streaming (live): {cfg.WebUrl}");
-
-            int interval = MinIntervalMs(cfg.MaxFps);
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            while (!ct.IsCancellationRequested)
+            try
             {
-                long start = sw.ElapsedMilliseconds;
-                var png = await renderer.CaptureAsync();
-                using (var img = Image.Load<Rgba32>(png))
+                await using var renderer = new WebRenderer(KrakenLcdDriver.Width);
+                await renderer.StartAsync(target);
+
+                driver.EnterStreamingMode(cfg.Brightness);
+                Log($"web-page streaming (live): {cfg.WebUrl}");
+
+                int interval = MinIntervalMs(cfg.MaxFps);
+                var sw = Stopwatch.StartNew();
+                while (!ct.IsCancellationRequested)
                 {
-                    LcdFrame.Fit(img, KrakenLcdDriver.Width, cfg.Rotation);
-                    driver.PushFrameRaw(LcdFrame.ToBgr888(img));
-                    if (PreviewDue()) SavePreview(img, cfg.Rotation);
+                    long start = sw.ElapsedMilliseconds;
+                    var png = await renderer.CaptureAsync();
+                    using (var img = Image.Load<Rgba32>(png))
+                    {
+                        LcdFrame.Fit(img, KrakenLcdDriver.Width, cfg.Rotation);
+                        driver.PushFrameRaw(LcdFrame.ToBgr888(img));
+                        if (PreviewDue()) SavePreview(img, cfg.Rotation);
+                    }
+                    int wait = interval - (int)(sw.ElapsedMilliseconds - start);
+                    if (wait > 0) { try { await Task.Delay(wait, ct); } catch { break; } }
                 }
-                int wait = interval - (int)(sw.ElapsedMilliseconds - start);
-                if (wait > 0) { try { await Task.Delay(wait, ct); } catch { break; } }
+            }
+            catch when (isYouTube)
+            {
+                if (!HasCommand("yt-dlp") || !HasCommand("ffmpeg")) throw;
+
+                Log("web-page embed failed for YouTube; falling back to yt-dlp + ffmpeg");
+                await RunYouTubeFallbackAsync(driver, cfg, input, ct);
             }
         }
         finally { server?.Dispose(); }
@@ -233,6 +245,144 @@ public static class ServiceRunner
         _ => "",
     };
 
+    /// <summary>
+    /// YouTube fallback path: resolve a direct media URL with yt-dlp and stream frames via ffmpeg.
+    /// This avoids browser codec/embed policy problems.
+    /// </summary>
+    private static async Task RunYouTubeFallbackAsync(KrakenLcdDriver driver, DashboardConfig cfg, string youtubeUrl, CancellationToken ct)
+    {
+        int size = KrakenLcdDriver.Width, frameBytes = size * size * 3;
+        string vf = $"scale={size}:{size}:force_original_aspect_ratio=increase,crop={size}:{size}{RotateFilter(cfg.Rotation)}";
+
+        driver.EnterStreamingMode(cfg.Brightness);
+        Log("youtube fallback streaming (yt-dlp + ffmpeg)");
+
+        while (!ct.IsCancellationRequested)
+        {
+            var mediaUrl = await ResolveYouTubeMediaUrlAsync(youtubeUrl, ct)
+                ?? throw new InvalidOperationException("yt-dlp could not resolve a playable media URL.");
+
+            var psi = new ProcessStartInfo("ffmpeg")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+
+            foreach (var a in new[]
+                     {
+                         "-hide_banner", "-loglevel", "error",
+                         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
+                         "-i", mediaUrl,
+                         "-vf", vf,
+                         "-pix_fmt", "bgr24",
+                         "-f", "rawvideo",
+                     })
+                psi.ArgumentList.Add(a);
+            if (cfg.MaxFps > 0) { psi.ArgumentList.Add("-r"); psi.ArgumentList.Add(cfg.MaxFps.ToString()); }
+            psi.ArgumentList.Add("-");
+
+            using var proc = Process.Start(psi)
+                ?? throw new InvalidOperationException("ffmpeg not found — install it (e.g. sudo dnf install ffmpeg). ");
+
+            var stream = proc.StandardOutput.BaseStream;
+            var buf = new byte[frameBytes];
+
+            try
+            {
+                bool gotFrame = false;
+                while (!ct.IsCancellationRequested)
+                {
+                    int off = 0;
+                    while (off < frameBytes)
+                    {
+                        int n = await stream.ReadAsync(buf.AsMemory(off, frameBytes - off), ct);
+                        if (n <= 0) { off = -1; break; }
+                        off += n;
+                    }
+
+                    if (off < 0) break;
+                    gotFrame = true;
+                    driver.PushFrameRaw(buf);
+                    if (PreviewDue())
+                    {
+                        using var raw = Image.LoadPixelData<Bgr24>(buf, size, size);
+                        using var p = raw.CloneAs<Rgba32>();
+                        SavePreview(p, cfg.Rotation);
+                    }
+                }
+
+                if (!gotFrame)
+                    throw new InvalidOperationException("ffmpeg received no frames from YouTube media URL.");
+            }
+            finally
+            {
+                try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
+            }
+
+            // Direct media URLs expire; re-resolve and continue to simulate looping behavior.
+            if (!ct.IsCancellationRequested)
+                Log("youtube fallback: stream ended, resolving next media URL");
+        }
+    }
+
+    private static bool HasCommand(string name)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("which")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            psi.ArgumentList.Add(name);
+            using var proc = Process.Start(psi);
+            if (proc is null) return false;
+            proc.WaitForExit(1500);
+            return proc.ExitCode == 0;
+        }
+        catch { return false; }
+    }
+
+    private static async Task<string?> ResolveYouTubeMediaUrlAsync(string url, CancellationToken ct)
+    {
+        var psi = new ProcessStartInfo("yt-dlp")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+
+        foreach (var a in new[]
+                 {
+                     "--no-playlist",
+                     "-f", "bv*[height<=1080]/bv*/b[height<=1080]/b/best",
+                     "-g",
+                     url,
+                 })
+            psi.ArgumentList.Add(a);
+
+        using var proc = Process.Start(psi)
+            ?? throw new InvalidOperationException("yt-dlp not found — install yt-dlp for YouTube fallback.");
+
+        string stdout = await proc.StandardOutput.ReadToEndAsync();
+        string stderr = await proc.StandardError.ReadToEndAsync();
+        await proc.WaitForExitAsync(ct);
+
+        if (proc.ExitCode != 0)
+            throw new InvalidOperationException($"yt-dlp failed: {stderr.Trim()}");
+
+        foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (line.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                || line.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                return line;
+        }
+
+        return null;
+    }
+
     /// <summary>Min ms between frames for a target fps; 0 fps = uncapped (0 ms).</summary>
     private static int MinIntervalMs(int maxFps) => maxFps > 0 ? Math.Max(1, 1000 / maxFps) : 0;
 
@@ -277,6 +427,13 @@ public static class ServiceRunner
         if (id is null) return url; // plain URL or local .html — WebRenderer resolves file paths
          return $"https://www.youtube.com/embed/{id}" +
              $"?autoplay=1&mute=1&loop=1&playlist={id}&controls=0&modestbranding=1&playsinline=1&rel=0";
+    }
+
+    private static bool IsYouTubeUrl(string url)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(url,
+            @"(?:youtube\.com/(?:watch\?v=|embed/|shorts/)|youtu\.be/)([A-Za-z0-9_-]{11})");
+        return m.Success;
     }
 
     /// <summary>

@@ -43,6 +43,9 @@ In Dashboard / GIF+Dashboard / local Web Page modes, sensors are served at
 - A **systemd**-based Linux (the service uses `systemctl --user`).
 - Optional: `nvidia-smi` for NVIDIA GPU stats; AMD GPUs are read from `/sys` automatically.
 - Optional, for **Video mode**: `ffmpeg` (e.g. `sudo dnf install ffmpeg`).
+- Optional, for **Web Page mode with YouTube/video sites**: a system `chrome`/`chromium`
+  install with media codecs. (Playwright's bundled Chromium is enough for Dashboard rendering,
+  but may fail on YouTube playback.)
 - Optional, for **GIPHY search** only: a free GIPHY API key. Get one at
   <https://developers.giphy.com> and export it before launching the GUI:
   ```bash
@@ -57,7 +60,8 @@ cd kraken-elite-screen-manager
 ./scripts/install.sh
 ```
 `install.sh` does everything: checks for .NET 10 → `dotnet publish -c Release` → downloads the
-Chromium used by Dashboard mode → installs the udev rule for sudo-free USB (prompts for sudo) →
+Playwright Chromium used for Dashboard/local page rendering (not guaranteed to include YouTube
+media codecs) → installs the udev rule for sudo-free USB (prompts for sudo) →
 installs + enables + starts the user service. If the Kraken was already plugged in and you aren't in
 the `wheel` group, replug its USB once so permissions apply.
 

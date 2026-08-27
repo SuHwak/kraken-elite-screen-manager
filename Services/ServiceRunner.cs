@@ -261,7 +261,7 @@ public static class ServiceRunner
     private static async Task RunYouTubeFallbackAsync(KrakenLcdDriver driver, DashboardConfig cfg, string youtubeUrl, CancellationToken ct)
     {
         int size = KrakenLcdDriver.Width, frameBytes = size * size * 3;
-        int outFps = cfg.MaxFps > 0 ? cfg.MaxFps : 30;
+        int outFps = cfg.MaxFps > 0 ? cfg.MaxFps : 60;
         string vf = $"scale={size}:{size}:force_original_aspect_ratio=increase,crop={size}:{size}{RotateFilter(cfg.Rotation)}";
 
         driver.EnterStreamingMode(cfg.Brightness);
@@ -298,12 +298,17 @@ public static class ServiceRunner
 
             var stream = proc.StandardOutput.BaseStream;
             var buf = new byte[frameBytes];
+            long frames = 0;
+            double readMs = 0;
+            double pushMs = 0;
+            var rate = Stopwatch.StartNew();
 
             try
             {
                 bool gotFrame = false;
                 while (!ct.IsCancellationRequested)
                 {
+                    var tRead = Stopwatch.StartNew();
                     int off = 0;
                     while (off < frameBytes)
                     {
@@ -311,10 +316,26 @@ public static class ServiceRunner
                         if (n <= 0) { off = -1; break; }
                         off += n;
                     }
+                    tRead.Stop();
 
                     if (off < 0) break;
                     gotFrame = true;
+
+                    var tPush = Stopwatch.StartNew();
                     driver.PushFrameRaw(buf);
+                    tPush.Stop();
+
+                    frames++;
+                    readMs += tRead.Elapsed.TotalMilliseconds;
+                    pushMs += tPush.Elapsed.TotalMilliseconds;
+
+                    if (frames % 120 == 0)
+                    {
+                        var elapsed = Math.Max(0.001, rate.Elapsed.TotalSeconds);
+                        var fps = frames / elapsed;
+                        Log($"youtube fallback perf: fps={fps:F1}, read={readMs / frames:F1}ms, push={pushMs / frames:F1}ms");
+                    }
+
                     if (PreviewDue())
                     {
                         using var raw = Image.LoadPixelData<Bgr24>(buf, size, size);
@@ -358,11 +379,12 @@ public static class ServiceRunner
 
     private static async Task<string?> ResolveYouTubeMediaUrlAsync(string url, CancellationToken ct)
     {
-        // First force <=420p to reduce bandwidth/decode cost and improve smoothness.
+        // Prefer quality near panel-native needs (<=720p) and allow up to 60fps.
+        // If unavailable on a specific video, fall back to best available stream.
         // If unavailable on a specific video, fall back to best available stream.
         var formats = new[]
         {
-            "bv*[vcodec~='^avc1'][height<=420][fps<=30]/bv*[height<=420][fps<=30]/bv*[height<=420]/b[height<=420][fps<=30]/b[height<=420]",
+            "bv*[vcodec~='^avc1'][height<=720][fps<=60]/bv*[height<=720][fps<=60]/bv*[height<=720]/b[height<=720][fps<=60]/b[height<=720]",
             "b/bv*/best",
         };
 

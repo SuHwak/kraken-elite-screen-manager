@@ -22,7 +22,8 @@ It has two parts:
   legibility option (frosted chips / dim / vignette + a dimming slider).
 - **Web Page** — stream **any URL or your own local HTML page** to the LCD. A local page is served
   same-origin so it can `fetch('/data.json')` for live sensors (below). YouTube links auto-embed and
-  loop, muted. If embed playback fails, the service auto-falls back to `yt-dlp + ffmpeg` for YouTube.
+  loop, muted. If `yt-dlp` + `ffmpeg` are installed, YouTube links use direct media streaming
+  automatically (most reliable); otherwise embed mode is used and may fail on some systems.
 - **Video** — loop a **local video file** (mp4/mkv/webm/…), decoded by **FFmpeg** (any codec).
 - **Stock Coolant** — the built-in NZXT liquid-temperature screen.
 

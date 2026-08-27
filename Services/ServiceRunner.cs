@@ -138,6 +138,15 @@ public static class ServiceRunner
         // fetch('/data.json') same-origin; a remote URL is loaded directly.
         var input = cfg.WebUrl.Trim();
         bool isYouTube = IsYouTubeUrl(input);
+
+        // Prefer direct media streaming for YouTube when tools are available; this avoids
+        // embedded-player policy/codec issues (e.g. Error 152/153 in headless Chromium).
+        if (isYouTube && HasCommand("yt-dlp") && HasCommand("ffmpeg"))
+        {
+            await RunYouTubeFallbackAsync(driver, cfg, input, ct);
+            return;
+        }
+
         bool isLocalFile = !input.StartsWith("http", StringComparison.OrdinalIgnoreCase) && File.Exists(input);
 
         SensorServer? server = null;

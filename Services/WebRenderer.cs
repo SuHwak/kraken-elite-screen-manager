@@ -27,21 +27,7 @@ public sealed class WebRenderer : IAsyncDisposable
     public async Task StartAsync(string target)
     {
         _pw = await Playwright.CreateAsync();
-        _browser = await _pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
-        {
-            Headless = true,
-            Args = new[]
-            {
-                // Let videos (YouTube embeds, <video>) play without a user gesture.
-                "--autoplay-policy=no-user-gesture-required",
-                // Keep JS timers (clock/temps polling) running at full rate — headless pages
-                // are otherwise treated as "background" and throttled to ~1/min after a few
-                // minutes, which freezes the dashboard's clock/temps mid-stream.
-                "--disable-background-timer-throttling",
-                "--disable-backgrounding-occluded-windows",
-                "--disable-renderer-backgrounding",
-            },
-        });
+        _browser = await LaunchBrowserAsync(_pw);
         _page = await _browser.NewPageAsync(new BrowserNewPageOptions
         {
             ViewportSize = new ViewportSize { Width = Size, Height = Size },
@@ -59,6 +45,38 @@ public sealed class WebRenderer : IAsyncDisposable
         await ConfigureTargetHeadersAsync(resolved);
         // 'Load' rather than 'NetworkIdle' — streaming/video pages never go idle.
         await _page.GotoAsync(resolved, new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 20000 });
+    }
+
+    private static async Task<IBrowser> LaunchBrowserAsync(IPlaywright pw)
+    {
+        var args = new[]
+        {
+            // Let videos (YouTube embeds, <video>) play without a user gesture.
+            "--autoplay-policy=no-user-gesture-required",
+            // Keep JS timers (clock/temps polling) running at full rate — headless pages
+            // are otherwise treated as "background" and throttled to ~1/min after a few
+            // minutes, which freezes the dashboard's clock/temps mid-stream.
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+        };
+
+        // Prefer system browsers with media codecs (YouTube/H.264/AAC), then fall back to Playwright's bundled Chromium.
+        var launchers = new List<Func<Task<IBrowser>>>
+        {
+            () => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true, Channel = "chrome", Args = args }),
+            () => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true, Channel = "chromium", Args = args }),
+            () => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true, Args = args }),
+        };
+
+        Exception? last = null;
+        foreach (var launch in launchers)
+        {
+            try { return await launch(); }
+            catch (Exception ex) { last = ex; }
+        }
+
+        throw new InvalidOperationException("Failed to launch a compatible Chromium/Chrome browser for Web mode.", last);
     }
 
     /// <summary>Capture the page. transparent=true → PNG with the page background omitted

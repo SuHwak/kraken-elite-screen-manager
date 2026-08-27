@@ -276,7 +276,7 @@ public static class ServiceRunner
         if (m.Success) id = m.Groups[1].Value;
         if (id is null) return url; // plain URL or local .html — WebRenderer resolves file paths
         return $"https://www.youtube-nocookie.com/embed/{id}" +
-               $"?autoplay=1&mute=1&loop=1&playlist={id}&controls=0&modestbranding=1&playsinline=1&rel=0";
+               $"?autoplay=1&mute=1&loop=1&playlist={id}&controls=0&modestbranding=1&playsinline=1&rel=0&enablejsapi=1&origin=https%3A%2F%2Fwww.youtube.com";
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using Microsoft.Playwright;
@@ -11,6 +12,10 @@ namespace KrakenEliteScreenManager.Services;
 /// </summary>
 public sealed class WebRenderer : IAsyncDisposable
 {
+    // Stable desktop UA so video providers serve standard embed/player behavior.
+    private const string DefaultUserAgent =
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
+
     public int Size { get; }
 
     private IPlaywright? _pw;
@@ -41,6 +46,7 @@ public sealed class WebRenderer : IAsyncDisposable
         {
             ViewportSize = new ViewportSize { Width = Size, Height = Size },
             DeviceScaleFactor = 1,
+            UserAgent = DefaultUserAgent,
         });
         await GotoAsync(target);
     }
@@ -49,8 +55,10 @@ public sealed class WebRenderer : IAsyncDisposable
     public async Task GotoAsync(string target)
     {
         if (_page is null) throw new InvalidOperationException("Renderer not started.");
+        var resolved = ResolveTarget(target);
+        await ConfigureTargetHeadersAsync(resolved);
         // 'Load' rather than 'NetworkIdle' — streaming/video pages never go idle.
-        await _page.GotoAsync(ResolveTarget(target), new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 20000 });
+        await _page.GotoAsync(resolved, new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 20000 });
     }
 
     /// <summary>Capture the page. transparent=true → PNG with the page background omitted
@@ -74,6 +82,38 @@ public sealed class WebRenderer : IAsyncDisposable
         var full = Path.GetFullPath(target);
         if (!File.Exists(full)) throw new FileNotFoundException($"HTML file not found: {full}");
         return new Uri(full).AbsoluteUri;
+    }
+
+    private async Task ConfigureTargetHeadersAsync(string target)
+    {
+        if (_page is null) return;
+
+        if (!Uri.TryCreate(target, UriKind.Absolute, out var uri))
+        {
+            await _page.SetExtraHTTPHeadersAsync(new Dictionary<string, string>());
+            return;
+        }
+
+        if (IsYouTubeHost(uri.Host))
+        {
+            await _page.SetExtraHTTPHeadersAsync(new Dictionary<string, string>
+            {
+                ["Referer"] = "https://www.youtube.com/",
+                ["Origin"] = "https://www.youtube.com",
+                ["Accept-Language"] = "en-US,en;q=0.9",
+            });
+            return;
+        }
+
+        await _page.SetExtraHTTPHeadersAsync(new Dictionary<string, string>());
+    }
+
+    private static bool IsYouTubeHost(string host)
+    {
+        host = host.ToLowerInvariant();
+        return host.Contains("youtube.com")
+            || host.Contains("youtube-nocookie.com")
+            || host.Equals("youtu.be", StringComparison.OrdinalIgnoreCase);
     }
 
     public async ValueTask DisposeAsync()

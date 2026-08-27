@@ -261,6 +261,7 @@ public static class ServiceRunner
     private static async Task RunYouTubeFallbackAsync(KrakenLcdDriver driver, DashboardConfig cfg, string youtubeUrl, CancellationToken ct)
     {
         int size = KrakenLcdDriver.Width, frameBytes = size * size * 3;
+        int outFps = cfg.MaxFps > 0 ? cfg.MaxFps : 30;
         string vf = $"scale={size}:{size}:force_original_aspect_ratio=increase,crop={size}:{size}{RotateFilter(cfg.Rotation)}";
 
         driver.EnterStreamingMode(cfg.Brightness);
@@ -281,14 +282,15 @@ public static class ServiceRunner
             foreach (var a in new[]
                      {
                          "-hide_banner", "-loglevel", "error",
+                         "-hwaccel", "auto",
                          "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
                          "-i", mediaUrl,
                          "-vf", vf,
+                         "-r", outFps.ToString(),
                          "-pix_fmt", "bgr24",
                          "-f", "rawvideo",
                      })
                 psi.ArgumentList.Add(a);
-            if (cfg.MaxFps > 0) { psi.ArgumentList.Add("-r"); psi.ArgumentList.Add(cfg.MaxFps.ToString()); }
             psi.ArgumentList.Add("-");
 
             using var proc = Process.Start(psi)
@@ -366,7 +368,7 @@ public static class ServiceRunner
         foreach (var a in new[]
                  {
                      "--no-playlist",
-                     "-f", "bv*[height<=1080]/bv*/b[height<=1080]/b/best",
+                     "-f", "bv*[vcodec~='^avc1'][height<=720][fps<=30]/bv*[height<=720][fps<=30]/bv*[height<=720]/b[height<=720][fps<=30]/b[height<=720]/b",
                      "-g",
                      url,
                  })

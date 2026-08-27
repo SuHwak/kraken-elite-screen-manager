@@ -1,7 +1,9 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Threading.Tasks;
 using SixLabors.ImageSharp;
@@ -28,6 +30,8 @@ public sealed class PreviewRenderer : IAsyncDisposable
     private Image<Rgba32>? _gifFrame0;
     private string? _videoPath;
     private byte[]? _videoPng;
+    private string? _webPreviewUrl;
+    private byte[]? _webPreviewPng;
     private readonly HttpClient _serviceSensors = new() { Timeout = TimeSpan.FromMilliseconds(500) };
     private DateTime _coolantStamp;
     private double? _coolantCached;
@@ -44,6 +48,11 @@ public sealed class PreviewRenderer : IAsyncDisposable
 
             case DashboardMode.WebPage:
                 if (string.IsNullOrWhiteSpace(webUrl)) return null;
+                if (IsYouTubeUrl(webUrl))
+                {
+                    var yt = await YouTubePreviewPngAsync(webUrl);
+                    if (yt is not null) return yt;
+                }
                 await GotoAsync(ServiceRunner.ResolveWebTarget(webUrl));
                 return await _web!.CaptureAsync(transparent: false);
 
@@ -142,6 +151,106 @@ public sealed class PreviewRenderer : IAsyncDisposable
             return _videoPng;
         }
         catch { return null; }
+    }
+
+    private async Task<byte[]?> YouTubePreviewPngAsync(string webUrl)
+    {
+        if (webUrl == _webPreviewUrl && _webPreviewPng is not null) return _webPreviewPng;
+        if (!HasCommand("yt-dlp") || !HasCommand("ffmpeg")) return null;
+
+        try
+        {
+            var mediaUrl = await ResolveYouTubeMediaUrlAsync(webUrl);
+            if (string.IsNullOrWhiteSpace(mediaUrl)) return null;
+
+            var psi = new ProcessStartInfo("ffmpeg")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            foreach (var a in new[]
+                     {
+                         "-hide_banner", "-loglevel", "error",
+                         "-hwaccel", "auto",
+                         "-i", mediaUrl,
+                         "-frames:v", "1",
+                         "-vf", $"scale={Size}:{Size}:force_original_aspect_ratio=increase,crop={Size}:{Size}",
+                         "-f", "image2pipe", "-vcodec", "png", "-",
+                     })
+                psi.ArgumentList.Add(a);
+
+            using var proc = Process.Start(psi);
+            if (proc is null) return null;
+            using var ms = new MemoryStream();
+            await proc.StandardOutput.BaseStream.CopyToAsync(ms);
+            proc.WaitForExit(5000);
+            if (ms.Length == 0) return null;
+
+            _webPreviewPng = ms.ToArray();
+            _webPreviewUrl = webUrl;
+            return _webPreviewPng;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool IsYouTubeUrl(string url)
+    {
+        var m = Regex.Match(url,
+            @"(?:youtube\.com/(?:watch\?v=|embed/|shorts/)|youtu\.be/)([A-Za-z0-9_-]{11})");
+        return m.Success;
+    }
+
+    private static bool HasCommand(string name)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("which")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            psi.ArgumentList.Add(name);
+            using var proc = Process.Start(psi);
+            if (proc is null) return false;
+            proc.WaitForExit(1500);
+            return proc.ExitCode == 0;
+        }
+        catch { return false; }
+    }
+
+    private static async Task<string?> ResolveYouTubeMediaUrlAsync(string url)
+    {
+        var psi = new ProcessStartInfo("yt-dlp")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+
+        foreach (var a in new[]
+                 {
+                     "--no-playlist",
+                     "-f", "bv*[vcodec~='^avc1'][height<=720][fps<=30]/bv*[height<=720][fps<=30]/bv*[height<=720]/b[height<=720][fps<=30]/b[height<=720]/b",
+                     "-g",
+                     url,
+                 })
+            psi.ArgumentList.Add(a);
+
+        using var proc = Process.Start(psi);
+        if (proc is null) return null;
+
+        string stdout = await proc.StandardOutput.ReadToEndAsync();
+        await proc.WaitForExitAsync();
+        if (proc.ExitCode != 0) return null;
+
+        return stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault(line => line.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                                    || line.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
     }
 
     private static byte[] ToPng(Image img)

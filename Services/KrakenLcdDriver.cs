@@ -52,7 +52,6 @@ public sealed class KrakenLcdDriver : IDisposable
 
     // Index of the bucket currently on screen; never overwritten while live.
     private int _activeBucket = -1;
-    private bool _streamPrimed;
 
     public KrakenLcdDriver(Action<string>? log = null) => _log = log ?? (_ => { });
 
@@ -514,7 +513,6 @@ public sealed class KrakenLcdDriver : IDisposable
             for (byte i = 0; i < 16; i++) WriteThenRead(0x32, 0x02, i);      // delete all 16 buckets
             WriteThenRead(0x30, 0x02, 0x01, (byte)Math.Clamp(percent, 0, 100), 0x00, 0x00, 0x00, 0x1e);
             Drain();
-            _streamPrimed = false;
         }
     }
 
@@ -532,43 +530,19 @@ public sealed class KrakenLcdDriver : IDisposable
 
         lock (_hidSync)
         {
-            try
-            {
-                if (!_streamPrimed)
-                {
-                    // Prime once with the full CAM handshake, then keep subsequent
-                    // frames lean to reduce HID round-trips.
-                    Drain();
-                    WriteThenRead(StreamLut1);
-                    WriteThenRead(StreamLut2);
-                    _streamPrimed = true;
-                }
+            // ACK each HID command (flow control) so the bulk data never races ahead of "start".
+            Drain();
+            WriteThenRead(StreamLut1);
+            WriteThenRead(StreamLut2);
+            WriteThenRead(0x36, 0x01, 0x00, 0x01, 0x09);                        // start, asset mode 0x09
 
-                PushFrameRawCore(rgb888);
-            }
-            catch
-            {
-                // If firmware desyncs, retry once with a full re-prime path.
-                _streamPrimed = false;
-                Drain();
-                WriteThenRead(StreamLut1);
-                WriteThenRead(StreamLut2);
-                _streamPrimed = true;
-                PushFrameRawCore(rgb888);
-            }
+            var lenLe = BitConverter.GetBytes((uint)rgb888.Length);
+            var header = BulkMagic.Concat(new byte[] { 0x09, 0x00, 0x00, 0x00 }).Concat(lenLe).ToArray();
+            BulkWrite(header);
+            BulkWrite(rgb888, StreamUrb);                                       // match CAM's 245,760-byte transfers
+
+            WriteThenRead(0x36, 0x02);                                          // end
         }
-    }
-
-    private void PushFrameRawCore(byte[] rgb888)
-    {
-        WriteThenRead(0x36, 0x01, 0x00, 0x01, 0x09);                        // start, asset mode 0x09
-
-        var lenLe = BitConverter.GetBytes((uint)rgb888.Length);
-        var header = BulkMagic.Concat(new byte[] { 0x09, 0x00, 0x00, 0x00 }).Concat(lenLe).ToArray();
-        BulkWrite(header);
-        BulkWrite(rgb888, StreamUrb);                                       // match CAM's 245,760-byte transfers
-
-        WriteThenRead(0x36, 0x02);                                          // end
     }
 
     // --- bucket helpers (ported from liquidctl) ------------------------------

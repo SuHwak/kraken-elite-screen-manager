@@ -53,6 +53,15 @@ public sealed class KrakenLcdDriver : IDisposable
     // Index of the bucket currently on screen; never overwritten while live.
     private int _activeBucket = -1;
 
+    // Optional perf diagnostics for stable stream path (no protocol changes).
+    private readonly bool _profileStream = Environment.GetEnvironmentVariable("KRAKEN_PROFILE_STREAM") == "1";
+    private long _profileFrames;
+    private double _profileMsDrain;
+    private double _profileMsLut;
+    private double _profileMsStart;
+    private double _profileMsBulk;
+    private double _profileMsEnd;
+
     public KrakenLcdDriver(Action<string>? log = null) => _log = log ?? (_ => { });
 
     public void Open()
@@ -530,18 +539,51 @@ public sealed class KrakenLcdDriver : IDisposable
 
         lock (_hidSync)
         {
+            var tDrain = System.Diagnostics.Stopwatch.StartNew();
             // ACK each HID command (flow control) so the bulk data never races ahead of "start".
             Drain();
+            tDrain.Stop();
+
+            var tLut = System.Diagnostics.Stopwatch.StartNew();
             WriteThenRead(StreamLut1);
             WriteThenRead(StreamLut2);
+            tLut.Stop();
+
+            var tStart = System.Diagnostics.Stopwatch.StartNew();
             WriteThenRead(0x36, 0x01, 0x00, 0x01, 0x09);                        // start, asset mode 0x09
+            tStart.Stop();
 
             var lenLe = BitConverter.GetBytes((uint)rgb888.Length);
             var header = BulkMagic.Concat(new byte[] { 0x09, 0x00, 0x00, 0x00 }).Concat(lenLe).ToArray();
+            var tBulk = System.Diagnostics.Stopwatch.StartNew();
             BulkWrite(header);
             BulkWrite(rgb888, StreamUrb);                                       // match CAM's 245,760-byte transfers
+            tBulk.Stop();
 
+            var tEnd = System.Diagnostics.Stopwatch.StartNew();
             WriteThenRead(0x36, 0x02);                                          // end
+            tEnd.Stop();
+
+            if (_profileStream)
+            {
+                _profileFrames++;
+                _profileMsDrain += tDrain.Elapsed.TotalMilliseconds;
+                _profileMsLut += tLut.Elapsed.TotalMilliseconds;
+                _profileMsStart += tStart.Elapsed.TotalMilliseconds;
+                _profileMsBulk += tBulk.Elapsed.TotalMilliseconds;
+                _profileMsEnd += tEnd.Elapsed.TotalMilliseconds;
+
+                if (_profileFrames % 60 == 0)
+                {
+                    _log(
+                        "stream breakdown(ms/frame): " +
+                        $"drain={_profileMsDrain / _profileFrames:F2}, " +
+                        $"lut={_profileMsLut / _profileFrames:F2}, " +
+                        $"start={_profileMsStart / _profileFrames:F2}, " +
+                        $"bulk={_profileMsBulk / _profileFrames:F2}, " +
+                        $"end={_profileMsEnd / _profileFrames:F2}");
+                }
+            }
         }
     }
 

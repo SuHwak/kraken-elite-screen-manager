@@ -379,12 +379,12 @@ public static class ServiceRunner
 
     private static async Task<string?> ResolveYouTubeMediaUrlAsync(string url, CancellationToken ct)
     {
-        // Temporary performance test profile: force very low source resolution (<=144p).
+        // Prefer quality near panel-native needs (<=720p) and allow up to 60fps.
         // If unavailable on a specific video, fall back to best available stream.
         // If unavailable on a specific video, fall back to best available stream.
         var formats = new[]
         {
-            "bv*[vcodec~='^avc1'][height<=144][fps<=30]/bv*[height<=144][fps<=30]/bv*[height<=144]/b[height<=144][fps<=30]/b[height<=144]",
+            "bv*[vcodec~='^avc1'][height<=720][fps<=60]/bv*[height<=720][fps<=60]/bv*[height<=720]/b[height<=720][fps<=60]/b[height<=720]",
             "b/bv*/best",
         };
 
